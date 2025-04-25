@@ -54,21 +54,22 @@ def translate_text(text, target_language):
 def initialize_firebase():
     try:
         if not firebase_admin._apps:
-            # Load the Firebase credentials JSON from environment variable
+            # Load Firebase credentials JSON string from environment variable
             firebase_json = os.environ['FIREBASE_CREDS_JSON']
             
-            # Convert to file-like object using io.StringIO (required by Certificate())
-            cred = credentials.Certificate(io.StringIO(firebase_json))
-            
+            # Parse the JSON string into a dictionary
+            service_account_dict = json.loads(firebase_json)
+
+            # Use the parsed dictionary directly
+            cred = credentials.Certificate(service_account_dict)
+
             # Initialize Firebase Admin SDK
             initialize_app(cred, {
                 'databaseURL': os.getenv('FIREBASE_DATABASE_URL')
             })
     except Exception as e:
-        # Streamlit should not be used for critical logging
         print(f"[Firebase Initialization Error]: {str(e)}")
         raise
-
 # ----------------- Firebase Init -------------------
 initialize_firebase()
 
