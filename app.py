@@ -739,65 +739,14 @@ Provide a helpful response that:
     static_translations = {
         "language_switched": {
             "en": "Language switched to",
-            "hi": "भाषा बदल दी गई है",
-            "fr": "Langue changée en",
-            "es": "Idioma cambiado a",
-            "de": "Sprache gewechselt zu",
-            "zh-cn": "语言切换为",
-            "ar": "تم تغيير اللغة إلى",
-            "ru": "Язык переключен на",
-            "ja": "言語が変更されました",
-            "ko": "언어가 변경되었습니다",
-            "it": "Lingua cambiata in",
-            "pt": "Idioma alterado para",
-            "bn": "ভাষা পরিবর্তন করা হয়েছে",
-            "ta": "மொழி மாற்றப்பட்டது",
-            "te": "భాష మార్చబడింది",
-            "ml": "ഭാഷ മാറ്റി",
-            "kn": "ಭಾಷೆಯನ್ನು ಬದಲಿಸಲಾಗಿದೆ",
-            "mr": "भाषा बदलली गेली आहे",
-            "gu": "ભાષા બદલાઈ ગઈ છે",
-            "pa": "ਭਾਸ਼ਾ ਬਦਲ ਦਿੱਤੀ ਗਈ ਹੈ",
-            "or": "ଭାଷା ପରିବର୍ତ୍ତନ କରାଯାଇଛି",
-            "as": "ভাষা পৰিবৰ্তন কৰা হৈছে",
-            "ne": "भाषा परिवर्तन गरिएको छ",
-            "ur": "زبان تبدیل کر دی گئی ہے",
-            "sd": "ٻولي تبديل ڪئي وئي آهي",
-            "sa": "भाषा परिवर्तिता अस्ति",
-            "kok": "भाषा बदलली",
-            "mni": "লানগুয়েজ চেঞ্জ করা হইছে",
-            "doi": "भाषा बदल दी गई है",
-            "sat": "ᱵᱟᱹᱡᱟ ᱯᱟᱹᱨᱤᱵᱟᱹᱨᱛᱤᱱ ᱠᱟᱹᱨᱟᱹᱜ ᱠᱟᱹᱨᱟᱹᱜ",
-            "brx": "भाषा बदल दी गई है",
-            "mai": "भाषा बदलल गेल अछि"
+            "hi": "भाषा बदल दी गई है"
         }
     }
     
 
     supported_languages = [
         "en",  # English
-        "as",  # Assamese
-        "bn",  # Bengali
-        "brx", # Bodo
-        "doi", # Dogri
-        "gu",  # Gujarati
-        "hi",  # Hindi
-        "kn",  # Kannada
-        "ks",  # Kashmiri
-        "kok", # Konkani
-        "mai", # Maithili
-        "ml",  # Malayalam
-        "mni", # Manipuri
-        "mr",  # Marathi
-        "ne",  # Nepali
-        "or",  # Odia
-        "pa",  # Punjabi
-        "sa",  # Sanskrit
-        "sat", # Santali
-        "sd",  # Sindhi
-        "ta",  # Tamil
-        "te",  # Telugu
-        "ur"   # Urdu
+        "hi"  # Hindi
     ]
 
     # Display chat messages
