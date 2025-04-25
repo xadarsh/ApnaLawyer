@@ -53,21 +53,20 @@ def translate_text(text, target_language):
 
 def initialize_firebase():
     try:
-        # Check if Firebase Admin SDK is not initialized yet
         if not firebase_admin._apps:
-            # Load JSON from environment variable (it contains the entire Firebase service account JSON)
+            # Load the Firebase credentials JSON from environment variable
             firebase_json = os.environ['FIREBASE_CREDS_JSON']
             
-            # Convert the JSON string into a Python dictionary
-            service_account_dict = json.loads(firebase_json)
+            # Convert to file-like object using io.StringIO (required by Certificate())
+            cred = credentials.Certificate(io.StringIO(firebase_json))
             
-            # Initialize Firebase Admin SDK using the dictionary with credentials
-            initialize_app(credentials.Certificate(service_account_dict), {
-                'databaseURL': os.getenv('FIREBASE_DATABASE_URL')  # Get the database URL from environment variables
+            # Initialize Firebase Admin SDK
+            initialize_app(cred, {
+                'databaseURL': os.getenv('FIREBASE_DATABASE_URL')
             })
-            #st.write("[DEBUG] Firebase Admin SDK initialized successfully.")
     except Exception as e:
-        st.error(f"Firebase initialization error: {str(e)}")
+        # Streamlit should not be used for critical logging
+        print(f"[Firebase Initialization Error]: {str(e)}")
         raise
 
 # ----------------- Firebase Init -------------------
