@@ -1,6 +1,5 @@
 import time
 import os
-import io
 import streamlit as st
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -9,7 +8,7 @@ from langchain.memory import ConversationBufferWindowMemory
 from langchain.chains import ConversationalRetrievalChain
 from langchain_together import Together
 from footer import footer
-#from firebase_config import firebaseConfig
+from firebase_config import firebaseConfig
 import pyrebase
 # Import firebase_admin and credentials
 import firebase_admin
@@ -27,18 +26,13 @@ import soundfile as sf
 import numpy as np
 from io import BytesIO
 import tempfile
-
-
-import json
-
-
 # # Speech Recognition Imports (add these at top of file)
 # import tempfile
 import openai
 from dotenv import load_dotenv
 load_dotenv()
 openai.api_key = os.getenv('OPENAI_API_KEY')
-st.set_page_config(page_title="ApnaLawyer", layout="centered")
+
 # Function to translate text
 def translate_text(text, target_language):
     try:
@@ -51,45 +45,24 @@ def translate_text(text, target_language):
 # Initialize the translator
 #translator = Translator()
 
+# Initialize Firebase (you would call this at the start of your app)
 def initialize_firebase():
     try:
         if not firebase_admin._apps:
-            # Load Firebase credentials JSON string from environment variable
-            firebase_json = os.environ['FIREBASE_CREDS_JSON']
-            
-            # Parse the JSON string into a dictionary
-            service_account_dict = json.loads(firebase_json)
-
-            # Use the parsed dictionary directly
-            cred = credentials.Certificate(service_account_dict)
-
-            # Initialize Firebase Admin SDK
-            initialize_app(cred, {
-                'databaseURL': os.getenv('FIREBASE_DATABASE_URL')
+            cred = credentials.Certificate("apna-lawyer-firebase-adminsdk-fbsvc-e3bf4df175.json")
+            firebase_app = initialize_app(cred, {
+                'databaseURL': firebaseConfig['databaseURL']
             })
     except Exception as e:
-        print(f"[Firebase Initialization Error]: {str(e)}")
-        raise
+        st.error(f"Firebase initialization error: {str(e)}")
+
 # ----------------- Firebase Init -------------------
-initialize_firebase()
-
-firebaseConfig = {
-    "apiKey": os.getenv("FIREBASE_API_KEY"),
-    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN"),
-    "databaseURL": os.getenv("FIREBASE_DATABASE_URL"),
-    "projectId": os.getenv("FIREBASE_PROJECT_ID"),
-    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
-    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID"),
-    "appId": os.getenv("FIREBASE_APP_ID")
-}
-
-# Initialize Pyrebase for authentication
 firebase = pyrebase.initialize_app(firebaseConfig)
 auth = firebase.auth()
-
+initialize_firebase()
 
 # ----------------- Streamlit Config -------------------
-
+st.set_page_config(page_title="ApnaLawyer", layout="centered")
 
 col1, col2, col3 = st.columns([1, 30, 1])
 with col2:
@@ -508,7 +481,7 @@ def translate_text(text, target_language):
         translated_text = GoogleTranslator(source='auto', target=target_language).translate(text)
         return translated_text
     except Exception as e:
-        return f"⚠ Translation failed: {str(e)}"
+        return f"⚠ Translation failed: {str(e)}"
 
 def transcribe_audio(audio_bytes):
     """Transcribe audio using Whisper API"""
@@ -643,14 +616,17 @@ def chatbot_ui():
     prompt_template = """
 <s>[INST]
 You are ApnaLawyer.bot, a friendly legal assistant specializing in Indian law. You provide clear, accurate information about the Indian Penal Code (IPC) and related laws. 
+
 Key principles:
 - Be concise but thorough
 - Use simple language anyone can understand
 - Always clarify when something is outside your expertise
 - Structure responses logically but conversationally
+
 CONTEXT: {context}
 CHAT HISTORY: {chat_history}
 QUESTION: {question}
+
 Provide a helpful response that:
 1. Directly answers the question
 2. Cites relevant laws/sections when possible
@@ -743,11 +719,10 @@ Provide a helpful response that:
             "hi": "भाषा बदल दी गई है"
         }
     }
-    
 
     supported_languages = [
         "en",  # English
-        "hi"  # Hindi
+        "hi"   # Hindi
     ]
 
     # Display chat messages
