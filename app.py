@@ -20,18 +20,55 @@ import hashlib
 import urllib.parse
 from deep_translator import GoogleTranslator
 from langdetect import detect
-
+import textwrap
 from transformers import pipeline
 import soundfile as sf
 import numpy as np
 from io import BytesIO
 import tempfile
-# # Speech Recognition Imports (add these at top of file)
-# import tempfile
-import openai
+
+from langchain_together import Together
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferWindowMemory
+
+
+from requests_toolbelt._compat import gaecontrib
+import json
+import tempfile
+import time
+import requests
 from dotenv import load_dotenv
+import io
+import base64
+
+from datetime import datetime, timedelta
+from dateutil.parser import parse
+from langchain.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain_together import Together
+import pyrebase
+import re
+from langdetect import detect
+from deep_translator import GoogleTranslator
+
+load_dotenv() 
+llm = Together(
+    model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+    temperature=0.7,
+    max_tokens=1024,
+    together_api_key=os.getenv('TOGETHER_API_KEY')
+)
+
+
+# Load environment variables
 load_dotenv()
-openai.api_key = os.getenv('OPENAI_API_KEY')
+SPEECHMATICS_API_KEY = os.getenv('SPEECHMATICS_API_KEY')
+api_key = os.getenv('TOGETHER_API_KEY')  # Set this in your environment
+if not api_key:
+    st.error("Please set TOGETHER_API_KEY environment variable")
+    st.stop()
+
 
 # Function to translate text
 def translate_text(text, target_language):
@@ -41,6 +78,48 @@ def translate_text(text, target_language):
         return translated_text
     except Exception as e:
         return f"⚠ Translation failed: {str(e)}"
+    
+
+supported_languages = {
+    "hindi": "hi",
+    "english": "en",
+    "hinglish": "hi"  # special handling below
+}
+
+devanagari_regex = re.compile(r'[\u0900-\u097F]+')
+
+
+def detect_target_language(prompt):
+    """Detect if the response should be in Hindi, Hinglish, or English only."""
+    prompt_lower = prompt.lower().strip()
+
+    # Block Kannada and other unsupported scripts
+    if re.search(r'[\u0C80-\u0CFF]', prompt):  # Kannada unicode block
+        return "hindi"
+
+    # Check if explicitly mentioned like: 'in hindi'
+    for lang_name, lang_code in supported_languages.items():
+        if f"in {lang_name}" in prompt_lower:
+            return lang_name
+
+    # If it contains Devanagari, assume Hindi
+    if devanagari_regex.search(prompt):
+        return "hindi"
+
+    # Detect Hinglish by common Hindi terms in Latin script
+    if re.search(r'\bdhara\b|\bkanoon\b|\bnyay\b', prompt_lower) and detect(prompt) == 'en':
+        return "hinglish"
+
+    try:
+        detected = detect(prompt)
+        for name, code in supported_languages.items():
+            if code == detected:
+                return name
+    except:
+        pass
+
+    return "english"
+
 
 # Initialize the translator
 #translator = Translator()
@@ -268,11 +347,15 @@ def delete_chat_history(user_id, chat_id):
         return False
 
 def generate_chat_title(messages):
-    for message in messages:
-        if message['role'] == 'user':
-            user_message = message['content']
-            return user_message[:30] + "..." if len(user_message) > 30 else user_message
-    return "New Chat"
+    """Generate a title for the chat based on messages, with fallbacks."""
+    try:
+        for message in messages:
+            if message.get('role') == 'user' and message.get('content'):
+                user_message = message['content']
+                return user_message[:30] + "..." if len(user_message) > 30 else user_message
+    except (KeyError, TypeError):
+        pass
+    return "New Chat"  # Default fallback title
 
 def get_user_name(user_id):
     try:
@@ -471,70 +554,126 @@ def login_signup_ui():
             st.error(f"Google login failed: {str(e)}")
 
 # Initialize speech-to-text model (cached to avoid reloading)
-@st.cache_resource
-def load_speech_to_text_model():
-    return pipeline("automatic-speech-recognition", model="openai/whisper-base")
+# @st.cache_resource
+# def load_speech_to_text_model():
+#     return pipeline("automatic-speech-recognition", model="openai/whisper-base")
 
 # Function to translate text
-def translate_text(text, target_language):
-    try:
-        translated_text = GoogleTranslator(source='auto', target=target_language).translate(text)
-        return translated_text
-    except Exception as e:
-        return f"⚠ Translation failed: {str(e)}"
+def transcribe_audio(audio_bytes, auto_detect=False):
+    """Transcribe audio with auto language detection (English/Hindi)"""
+    if not SPEECHMATICS_API_KEY:
+        st.error("API key not configured!")
+        return None
 
-def transcribe_audio(audio_bytes):
-    """Transcribe audio using Whisper API"""
     try:
-        # Create temp file
+        API_BASE_URL = "https://asr.api.speechmatics.com/v2"
+        MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB free tier limit
+        TIMEOUT = 30  # seconds
+
+        # 1. Validate audio size
+        if len(audio_bytes) > MAX_FILE_SIZE:
+            st.error(f"Audio exceeds {MAX_FILE_SIZE/1024/1024}MB free tier limit")
+            return None
+
+        # 2. Create temp WAV file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
             tmpfile.write(audio_bytes)
             tmp_path = tmpfile.name
+
+        # 3. Configure language settings
+        language_config = {
+            "language": "auto" if auto_detect else st.session_state.get('language', 'en')
+        }
         
-        # Transcribe with Whisper
-        with open(tmp_path, "rb") as audio_file:
-            transcript = openai.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language=st.session_state.get('language', 'en')
+        # For auto-detect, specify possible languages (improves accuracy)
+        if auto_detect:
+            language_config["language_options"] = ["en", "hi"]  # English/Hindi only
+
+        job_config = {
+            "type": "transcription",
+            "transcription_config": {
+                **language_config,
+                "operating_point": "standard",
+                "enable_entities": False
+            }
+        }
+
+        headers = {"Authorization": f"Bearer {SPEECHMATICS_API_KEY}"}
+
+        # 4. Create job
+        with open(tmp_path, 'rb') as audio_file:
+            response = requests.post(
+                f"{API_BASE_URL}/jobs",
+                headers=headers,
+                files={
+                    'config': (None, json.dumps(job_config)),
+                    'data_file': ('audio.wav', audio_file)
+                },
+                timeout=TIMEOUT
             )
+
+        # 5. Handle response
+        if response.status_code != 201:
+            error_msg = response.json().get('error', {}).get('message', response.text)
+            st.error(f"Job creation failed: {error_msg}")
+            return None
+
+        job_id = response.json()['id']
+        st.session_state.current_job_id = job_id
+
+        # 6. Poll for completion
+        start_time = time.time()
+        detected_language = None
         
-        # Clean up temp file
-        try:
-            os.remove(tmp_path)
-        except:
-            pass  # Don't fail if temp file deletion fails
-        
-        return transcript['text']
-    
+        while True:
+            if time.time() - start_time > TIMEOUT:
+                raise Exception("Timeout waiting for transcription")
+
+            status_response = requests.get(
+                f"{API_BASE_URL}/jobs/{job_id}",
+                headers=headers,
+                timeout=TIMEOUT
+            )
+            status_data = status_response.json()
+            
+            # Capture detected language if auto mode
+            if auto_detect and not detected_language:
+                detected_language = status_data['job'].get('detected_language')
+                if detected_language:
+                    st.info(f"🔍 Detected language: {detected_language.upper()}")
+
+            if status_data['job']['status'] == 'done':
+                break
+            elif status_data['job']['status'] == 'failed':
+                raise Exception(f"Transcription failed: {status_data.get('error')}")
+            
+            time.sleep(2)
+
+        # 7. Get transcript
+        transcript_response = requests.get(
+            f"{API_BASE_URL}/jobs/{job_id}/transcript",
+            headers=headers,
+            params={'format': 'txt'},
+            timeout=TIMEOUT
+        )
+
+        if transcript_response.status_code != 200:
+            st.error(f"Failed to fetch transcript: {transcript_response.text}")
+            return None
+
+        return transcript_response.text
+
     except Exception as e:
-        st.error(f"Error transcribing audio: {str(e)}")
+        st.error(f"Transcription error: {str(e)}")
         return None
+    finally:
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
 
-# def transcribe_audio(audio_bytes):
-#     """Transcribe audio using Whisper API without PyDub"""
-#     try:
-#         # Create temp file
-#         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
-#             tmpfile.write(audio_bytes)
-#             tmp_path = tmpfile.name
-        
-#         # Transcribe with Whisper
-#         with open(tmp_path, "rb") as audio_file:
-#             transcript = openai.Audio.transcribe(
-#                 model="whisper-1",
-#                 file=audio_file,
-#                 language=st.session_state.get('language', 'en')
-#             )
-        
-#         os.remove(tmp_path)
-#         return transcript['text']
-    
-#     except Exception as e:
-#         st.error(f"Error transcribing audio: {str(e)}")
-#         return None
 
-# Add this function with your other utility functions
 def check_rate_limit():
     """Simple rate limiting for audio transcription"""
     if 'last_transcription_time' not in st.session_state:
@@ -551,10 +690,75 @@ def check_rate_limit():
     return True
 
 
+def create_new_chat():
+    """Properly reset the chat state and start a new chat session."""
+    # Save current chat if it has messages
+    if len(st.session_state.get('messages', [])) > 1:  # More than just welcome message
+        save_current_chat()
+    
+    # Reset conversation state
+    st.session_state.messages = [{
+        "role": "assistant",
+        "content": f"🎉✨ Welcome {st.session_state.user_name}! ✨🎉\n\nI'm ApnaLawyer, your AI legal assistant. "
+                   "I can help explain Indian laws in simple terms. What would you like to know?"
+    }]
+    st.session_state.current_chat_id = None
+    st.session_state.memory = ConversationBufferWindowMemory(k=2, memory_key="chat_history", return_messages=True)
+    # Clear any audio processing flags
+    if 'audio_processed' in st.session_state:
+        del st.session_state.audio_processed
+    st.rerun()
+
+def save_current_chat():
+    """Save the current chat to history before starting a new one."""
+    if len(st.session_state.get('messages', [])) > 1:  # More than just welcome message
+        chat_title = generate_chat_title(st.session_state.messages)
+        if hasattr(st.session_state, 'current_chat_id') and st.session_state.current_chat_id:
+            update_chat_history(st.session_state.user_id, st.session_state.current_chat_id, st.session_state.messages)
+        else:
+            chat_id = save_chat_to_history(st.session_state.user_id, chat_title, st.session_state.messages)
+            st.session_state.current_chat_id = chat_id
+        st.session_state.chat_history = get_chat_history(st.session_state.user_id)
+
+
+def load_chat(chat_id):
+    """Load a specific chat from history."""
+    # Save current chat if it has messages
+    if len(st.session_state.get('messages', [])) > 1:  # More than just welcome message
+        save_current_chat()
+    
+    # Load the selected chat
+    chat_data = next((chat for chat in st.session_state.chat_history if chat[0] == chat_id), None)
+    if chat_data:
+        st.session_state.messages = chat_data[1]['messages']
+        st.session_state.current_chat_id = chat_id
+        # Reinitialize memory with loaded messages
+        st.session_state.memory = ConversationBufferWindowMemory(k=2, memory_key="chat_history", return_messages=True)
+        for msg in chat_data[1]['messages'][:-2]:  # Skip last 2 messages to maintain window size
+            if msg['role'] == 'user':
+                st.session_state.memory.save_context({"question": msg['content']}, {"answer": ""})
+        st.rerun()
+
+def delete_chat(chat_id):
+    """Delete a specific chat from the user's chat history."""
+    try:
+        user_id = st.session_state.user_id
+        if delete_chat_history(user_id, chat_id):
+            # Show toast notification instead of message in chat history
+            st.toast("Chat deleted successfully!", icon="✅")
+            # Refresh chat history after deletion
+            st.session_state.chat_history = get_chat_history(user_id)
+            st.rerun()  # Force UI refresh
+        else:
+            st.toast("Failed to delete chat.", icon="❌")
+    except Exception as e:
+        st.toast(f"Error deleting chat: {str(e)}", icon="❌")
+
 def chatbot_ui():
     # Initialize language state
+    target_lang_code = "en"  # Default language is English
     if "language" not in st.session_state:
-        st.session_state.language = "en"  # Default language is English
+        st.session_state.language = target_lang_code # Default language is English
 
     # Initialize with personalized welcome message if first time
     if "messages" not in st.session_state:
@@ -565,7 +769,7 @@ def chatbot_ui():
         }]
 
     if "memory" not in st.session_state:
-        st.session_state.memory = ConversationBufferWindowMemory(k=2, memory_key="chat_history", return_messages=True)
+        st.session_state.memory = ConversationBufferWindowMemory(k=5, memory_key="chat_history", return_messages=True)
 
     # Get user ID
     if "user_id" not in st.session_state:
@@ -584,212 +788,173 @@ def chatbot_ui():
     db = FAISS.load_local("ipc_embed_db", embeddings, allow_dangerous_deserialization=True)
     db_retriever = db.as_retriever(search_type="similarity", search_kwargs={"k": 3})
 
-    # Audio recording section - modified to remove duplicate input
-    audio_file = st.audio_input("", key="audio_recorder")
-    audio_bytes = audio_file.getvalue() if audio_file else None
-
-
-    # Process audio if recorded
-    if audio_bytes:
-        if not os.getenv('OPENAI_API_KEY'):
-            st.error("Voice input disabled - OpenAI API key not configured")
-        elif not check_rate_limit():
-            st.warning("Please wait a moment before sending another voice message")
-        else:
-            with st.spinner("Transcribing your voice..."):
-                try:
-                    transcribed_text = transcribe_audio(audio_bytes)
-                    if transcribed_text:
-                        # Auto-inject the transcription
-                        st.session_state.audio_transcription = transcribed_text
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Transcription failed: {str(e)}")
-
-    # Single input handling for both text and voice
-    # prompt = st.chat_input("Type or speak your message...")
-    # if 'audio_transcription' in st.session_state:
-    #     prompt = st.session_state.audio_transcription
-    #     del st.session_state.audio_transcription
-
-
-    prompt_template = """
+    # Define the prompt template
+    prompt_template = PromptTemplate(
+    input_variables=["context", "question", "chat_history"],
+    template="""
 <s>[INST]
-You are ApnaLawyer.bot, a friendly legal assistant specializing in Indian law. You provide clear, accurate information about the Indian Penal Code (IPC) and related laws. 
+You are ApnaLawyer, a helpful and trustworthy legal assistant for Indian citizens. You specialize in Indian laws, especially the Indian Penal Code (IPC) and related Acts.
 
-Key principles:
-- Be concise but thorough
-- Use simple language anyone can understand
-- Always clarify when something is outside your expertise
-- Structure responses logically but conversationally
+### Instructions:
+- Be clear, accurate, and structured like a legal advisor
+- Break down relevant IPC sections clause-wise if applicable (e.g., 376(1), 376-AB, 376-DA, etc.)
+- For each section, give the official title, **scenario it applies to, and the **exact punishment
+- Also mention relevant Acts, e.g., Criminal Law Amendment Act, 2013, POCSO Act, etc.
+- Use legal formatting: bullets, sub-points, emojis (like 🔹, 🔸, ➡), line breaks
+- Always refer only to authentic Indian laws
+- Do not fabricate or invent sections
+- End with a short summary of suggested action
 
-CONTEXT: {context}
-CHAT HISTORY: {chat_history}
-QUESTION: {question}
+### CONTEXT:
+{context}
 
-Provide a helpful response that:
-1. Directly answers the question
-2. Cites relevant laws/sections when possible
-3. Notes important exceptions
-4. Suggests next steps if needed
-</s>[INST]
+### CHAT HISTORY:
+{chat_history}
+
+### QUESTION:
+{question}
+
+---
+
+Respond with the following structure:
+
+✅ Answer:  
+[A short summary of the situation and its legal seriousness]
+
+📘 Relevant Law(s):  
+[Break down each IPC section or Act related to the case, include title + clause-wise punishment]
+
+🧾 Other Related Laws:  
+[Include relevant provisions like POCSO, 228A IPC, CrPC 164, etc.]
+
+📝 Suggested Action:  
+[Practical steps to take — police report, medical exam, legal aid, etc.]
+
+</s>[/INST]
 """
+)
 
-    prompt = PromptTemplate(template=prompt_template, input_variables=['context', 'question', 'chat_history'])
+    # Initialize the ConversationalRetrievalChain
+    qa = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        memory=st.session_state.memory,
+        retriever=db_retriever,
+        combine_docs_chain_kwargs={'prompt': prompt_template}
+    )
 
-    api_key = os.getenv('TOGETHER_API_KEY')
-    if not api_key:
-        st.error("API key for Together is missing. Please set the TOGETHER_API_KEY environment variable.")
-
-    llm = Together(model="mistralai/Mixtral-8x22B-Instruct-v0.1", temperature=0.5, max_tokens=1024, together_api_key=api_key)
-
-    qa = ConversationalRetrievalChain.from_llm(llm=llm, memory=st.session_state.memory, retriever=db_retriever,
-                                               combine_docs_chain_kwargs={'prompt': prompt})
-
-        # Voice input functionality
-    def handle_voice_input():
-        st.session_state.recording = True
-        audio_file = audio_recorder()
-        if audio_file:
-            try:
-                # Extract bytes from UploadedFile
-                audio_bytes = audio_file.getvalue()  # Correctly extract bytes from UploadedFile
-                
-                # Convert bytes to numpy array
-                audio_array, sample_rate = sf.read(BytesIO(audio_bytes))
-                audio_dict = {"raw": audio_array, "sampling_rate": sample_rate}
-                
-                # Load model if not already loaded
-                if "speech_to_text" not in st.session_state:
-                    st.session_state.speech_to_text = load_speech_to_text_model()
-                
-                # Convert speech to text
-                text = st.session_state.speech_to_text(audio_dict)["text"]
-                
-                if text.strip():
-                    # Process the transcribed text as user input
-                    process_user_input(text)
-                
-            except Exception as e:
-                st.error(f"Error processing audio: {str(e)}")
-        st.session_state.recording = False
-
-    def extract_answer(full_response):
-        try:
-            answer_start = full_response.find("Response:")
-            if answer_start != -1:
-                answer_start += len("Response:")
-                return full_response[answer_start:].strip()
-            return full_response.strip()
-        except Exception as e:
-            return f"Error extracting answer: {str(e)}"
-
-    def create_new_chat():
-        st.session_state.messages = [{
-            "role": "assistant",
-            "content": f"🆕 New chat started {st.session_state.user_name}! What legal question can I help you with?"
-        }]
-        st.session_state.memory.clear()
-        st.session_state.current_chat_id = None
-        st.rerun()
-
-    def load_chat(chat_id):
-        try:
-            ref = firebase_db.reference(f'users/{st.session_state.user_id}/chats/{chat_id}')
-            chat_data = ref.get()
-            if chat_data:
-                st.session_state.messages = chat_data['messages']
-                st.session_state.current_chat_id = chat_id
-                st.session_state.memory.clear()
-                st.rerun()
-        except Exception as e:
-            st.error(f"Error loading chat: {str(e)}")
-
-    def delete_chat(chat_id):
-        if delete_chat_history(st.session_state.user_id, chat_id):
-            if st.session_state.current_chat_id == chat_id:
-                create_new_chat()
-            st.session_state.chat_history = get_chat_history(st.session_state.user_id)
-            st.rerun()
-
-    # Static translations dictionary
-    static_translations = {
-        "language_switched": {
-            "en": "Language switched to",
-            "hi": "भाषा बदल दी गई है"
-        }
-    }
-
-    supported_languages = [
-        "en",  # English
-        "hi"   # Hindi
-    ]
-
-    # Display chat messages
+    # Display all previous messages
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.write(message["content"])
+            st.markdown(message["content"])
 
-    # Handle user input
-    if prompt := st.chat_input("Say something..."):
+    # Text input box - always shown at the bottom
+    text_input = st.chat_input("Ask your legal question or record audio...")
+
+    # Handle text input
+    if text_input and 'audio_processed' not in st.session_state:
+        # Display user message immediately
         with st.chat_message("user"):
-            st.markdown(f"You: {prompt}")
+            st.markdown(text_input)
 
-        # Detect user language
-        user_language = detect(prompt)
-        if user_language in static_translations["language_switched"]:
-            st.session_state.language = user_language
+        # Add to message history
+        st.session_state.messages.append({"role": "user", "content": text_input})
 
-        # Check for language change command
-        if prompt.startswith("/language"):
-            lang_code = prompt.split(" ")[1].strip()
-            if lang_code not in supported_languages:
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": f"⚠ Unsupported language code: {lang_code}. Supported languages are: {', '.join(supported_languages)}."
-                })
-                st.experimental_rerun()
-            st.session_state.language = lang_code
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"{static_translations['language_switched'].get(lang_code, 'Language switched to')} {lang_code.upper()}."
-            })
-            st.experimental_rerun()
-
-        # Process user input
-        st.session_state.messages.append({"role": "user", "content": prompt})
-
+        # Generate and display response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking 💡..."):
-                result = qa.invoke(input=prompt)
-                answer = extract_answer(result["answer"])
+            with st.spinner("Thinking..."):
+                
+                # Auto-detect language from user prompt
+                # Auto-detect language from prompt
+                target_lang_name = detect_target_language(text_input)
+                if target_lang_name == "unsupported":
+                    st.warning("⚠ Currently only Hindi, English, and Hinglish are supported.")
+                    return
 
-                # Translate the chatbot's response if necessary
-                if st.session_state.language != "en":
-                    answer = translate_text(answer, st.session_state.language)
+                target_lang_code = supported_languages.get(target_lang_name, "en")
+
+                # Translate if necessary
+               
+                mod_input = f"""Please answer the following question in {target_lang_name} language, using clear legal terms:
+                {text_input}""" 
+                result = qa.invoke(input=mod_input)
+                answer = result["answer"]
+
 
                 message_placeholder = st.empty()
                 full_response = "⚠ Gentle reminder: We generally ensure precise information, but do double-check. \n\n\n"
                 for chunk in answer:
                     full_response += chunk
-                    time.sleep(0.002)
+                    time.sleep(0.006)
                     message_placeholder.markdown(full_response + " |", unsafe_allow_html=True)
-                message_placeholder.markdown(full_response)
 
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-        # Save or update chat
-        if len(st.session_state.messages) > 2:  # Only save if there's actual conversation
-            chat_title = generate_chat_title(st.session_state.messages)
-            if hasattr(st.session_state, 'current_chat_id') and st.session_state.current_chat_id:
-                update_chat_history(st.session_state.user_id, st.session_state.current_chat_id, st.session_state.messages)
-            else:
-                chat_id = save_chat_to_history(st.session_state.user_id, chat_title, st.session_state.messages)
-                st.session_state.current_chat_id = chat_id
-            # Refresh chat history
-            st.session_state.chat_history = get_chat_history(st.session_state.user_id)
+        # Update chat history
+        update_chat_history_function()
 
-    # Sidebar UI
+    # Audio input - shown below the text input
+    audio_file = st.audio_input("", key="audio_recorder")
+
+    # Handle audio input (only if no text input was processed in this cycle)
+    if audio_file and 'audio_processed' not in st.session_state and not text_input:
+        audio_bytes = audio_file.getvalue()
+
+        # Set flag to prevent duplicate processing
+        st.session_state.audio_processed = True
+
+        with st.spinner("Transcribing..."):
+            try:
+                transcribed_text = transcribe_audio(audio_bytes)
+
+                # Display transcribed text immediately
+                with st.chat_message("user"):
+                    st.markdown(transcribed_text)
+
+                st.session_state.messages.append({"role": "user", "content": transcribed_text})
+
+                # Generate and display response
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        
+
+                        # Detect desired language from user input
+                        # Detect desired language from user input
+                        target_lang_name = detect_target_language(transcribed_text)
+                        if target_lang_name == "unsupported":
+                            st.warning("⚠ Currently only Hindi, English, and Hinglish are supported.")
+                            return
+
+                        target_lang_code = supported_languages.get(target_lang_name, "en")
+
+                        # Handle Hinglish separately (keep original)
+                        
+                        mod_input = f"""Please answer the following question in {target_lang_name} language, using clear legal terms:
+                        {transcribed_text}"""
+                        result = qa.invoke(input=mod_input)
+                        answer = result["answer"]
+
+
+                        # else: leave in English or handle more languages later
+                        message_placeholder = st.empty()
+                        full_response = "⚠ Gentle reminder: We generally ensure precise information, but do double-check. \n\n\n"
+                        for chunk in answer:
+                            full_response += chunk
+                            time.sleep(0.006)
+                            message_placeholder.markdown(full_response + " |", unsafe_allow_html=True)
+
+                    st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+                # Update chat history
+                update_chat_history_function()
+
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+            finally:
+                # Clear the flag after processing
+                if 'audio_processed' in st.session_state:
+                    del st.session_state.audio_processed
+
+    # Sidebar UI (unchanged from your original)
     with st.sidebar:
         st.markdown(f"""
         <div style="margin-bottom: 20px;">
@@ -797,42 +962,53 @@ Provide a helpful response that:
             <p style="color: rgba(255,255,255,0.7); font-size: 12px; margin-top: 0;">{st.session_state.user_email}</p>
         </div>
         """, unsafe_allow_html=True)
-        
-        if st.button("➕ New Chat", use_container_width=True):
+
+        # Button for creating a new chat
+        if st.button("➕ New Chat", key="new_chat_button", use_container_width=True):
             create_new_chat()
-        
-        st.markdown("---")
-        st.markdown("### Chat History")
-        
+
+        # Chat history section
         if hasattr(st.session_state, 'chat_history') and st.session_state.chat_history:
             for chat_id, chat_data in st.session_state.chat_history:
-                timestamp = time.strftime('%d %b %Y, %I:%M %p', time.localtime(chat_data['last_updated']))
-                
+                # Safely get title with default
+                chat_title = chat_data.get('title', 'Untitled Chat')
+                timestamp = time.strftime('%d %b %Y, %I:%M %p', 
+                    time.localtime(chat_data.get('last_updated', time.time())))
+
                 col1, col2 = st.columns([0.8, 0.2])
                 with col1:
                     if st.button(
-                        f"{chat_data['title']}",
-                        key=f"chat_{chat_id}",
+                        f"{chat_title}",
+                        key=f"chat_{chat_id}",  # Unique key for each chat button
                         help=f"Last updated: {timestamp}",
                         use_container_width=True
                     ):
                         load_chat(chat_id)
                 with col2:
-                    if st.button("🗑", key=f"delete_{chat_id}"):
+                    if st.button("🗑", key=f"delete_{chat_id}"):  # Unique key for each delete button
                         delete_chat(chat_id)
         else:
             st.markdown("<p style='color: rgba(255,255,255,0.5);'>No chat history yet</p>", unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        if st.button("🚪 Logout", use_container_width=True):
+
+        # Logout button
+        if st.button("🚪 Logout", key="logout_button", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.user_email = None
             st.session_state.user_name = None
             st.session_state.user_id = None
             st.rerun()
 
-    footer()
+
+def update_chat_history_function():
+    """Helper function to update chat history"""
+    if len(st.session_state.messages) > 2:
+        chat_title = generate_chat_title(st.session_state.messages)
+        if hasattr(st.session_state, 'current_chat_id') and st.session_state.current_chat_id:
+            update_chat_history(st.session_state.user_id, st.session_state.current_chat_id, st.session_state.messages)
+        else:
+            chat_id = save_chat_to_history(st.session_state.user_id, chat_title, st.session_state.messages)
+            st.session_state.current_chat_id = chat_id
+        st.session_state.chat_history = get_chat_history(st.session_state.user_id)
 
 # ----------------- Main App -------------------
 if "logged_in" not in st.session_state:
@@ -841,4 +1017,7 @@ if "logged_in" not in st.session_state:
 if not st.session_state.logged_in:
     login_signup_ui()
 else:
+    # Main chat interface
     chatbot_ui()
+    # Footer
+    footer()
