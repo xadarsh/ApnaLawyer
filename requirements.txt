@@ -1,26 +1,57 @@
-streamlit
-langchain==0.1.15
-langchain-fireworks
-langchain-together
-pypdf
-transformers==4.39.3
-sentence-transformers
-accelerate
-faiss-cpu
-einops
-ray==2.10.0
-unstructured
-htbuilder
-pyrebase4        # ✅ Fixed version for Firebase
-pycryptodome
-firebase-admin
-openai           # ✅ For Whisper or GPT
-requests         # ✅ For API requests
-sounddevice
-numpy
-wave
-python-dotenv
-deep-translator
-langdetect
-soundfile
-torch
+# ================================
+# Streamlit App and Core Packages
+# ================================
+streamlit==1.44.1                 # Web app framework for interactive apps
+python-dotenv                    # Load environment variables from .env file
+
+# ====================
+# Langchain Ecosystem
+# ====================
+langchain==0.1.15                # Core LangChain framework
+langchain-fireworks              # LangChain integration for Fireworks AI
+langchain-together               # LangChain integration for Together AI
+
+# ==================
+# Embeddings & LLMs
+# ==================
+transformers==4.39.3             # HuggingFace Transformers (for models)
+sentence-transformers            # Pre-trained sentence embeddings
+accelerate                       # Optimizer for HuggingFace models
+faiss-cpu                        # Vector similarity search
+einops                           # Tensor manipulation for models
+
+# ===================
+# Firebase Integration
+# ===================
+pyrebase4                        # Firebase client (auth, db, storage)
+firebase-admin                   # Firebase Admin SDK (server-side)
+pycryptodome                     # Required by pyrebase for cryptographic operations
+
+# ===================
+# PDF & File Handling
+# ===================
+pypdf                            # PDF parsing and text extraction
+unstructured                     # For document parsing and content extraction
+htbuilder                        # HTML tag builder (used for custom UI in Streamlit)
+
+# ========================
+# Audio Input & Processing
+# ========================
+sounddevice                      # Capture microphone audio in real time
+soundfile                        # Read/write audio files
+numpy                            # Numerical operations (used in audio/data)
+wave                             # Standard library for .wav file handling
+
+# ====================
+# Translation & NLP
+# ====================
+deep-translator                  # Translate text using Google Translate API
+langdetect                       # Detect language of input text
+
+# ============================
+# LLM API Clients & Utilities
+# ============================
+openai                           # OpenAI Whisper, GPT, etc.
+requests==2.31.0                 # HTTP requests (compatible with pyrebase4)
+urllib3==1.26.16                 # Dependency for requests (prevents errors with pyrebase)
+requests_toolbelt==0.10.1        # Compatibility for certain Firebase/requests operations
