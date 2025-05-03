@@ -1,112 +1,135 @@
-import time
+# Standard libraries
 import os
+import re
+import io
+import json
+import time
+import base64
+import hashlib
+import tempfile
+from datetime import datetime, timedelta
+
+# Streamlit & UI components
 import streamlit as st
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.prompts import PromptTemplate
-from langchain.memory import ConversationBufferWindowMemory
-from langchain.chains import ConversationalRetrievalChain
-from langchain_together import Together
-from footer import footer
-from firebase_config import firebaseConfig
+import streamlit.components.v1 as components
+
+# Firebase (Realtime + Pyrebase4)
 import pyrebase
-# Import firebase_admin and credentials
 import firebase_admin
 from firebase_admin import credentials, initialize_app, db as firebase_db
 
-# Add at the top of your file
-import streamlit.components.v1 as components
-import hashlib
-import urllib.parse
-from deep_translator import GoogleTranslator
-from langdetect import detect
-import textwrap
-from transformers import pipeline
-import soundfile as sf
-import numpy as np
-from io import BytesIO
-import tempfile
-
-from langchain_together import Together
-from langchain.chains import ConversationalRetrievalChain
+# Langchain core
+from langchain.prompts import PromptTemplate, ChatPromptTemplate
 from langchain.memory import ConversationBufferWindowMemory
-
-
-from requests_toolbelt._compat import gaecontrib
-import json
-import tempfile
-import time
-import requests
-from dotenv import load_dotenv
-import io
-import base64
-
-from datetime import datetime, timedelta
-from dateutil.parser import parse
-from langchain.prompts import ChatPromptTemplate
+from langchain.chains import ConversationalRetrievalChain
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_together import Together
-import pyrebase
-import re
-from langdetect import detect
-from deep_translator import GoogleTranslator
 
-load_dotenv() 
+# NLP & translation
+from transformers import pipeline
+from deep_translator import GoogleTranslator
+from langdetect import detect
+import textwrap
+
+# Audio processing
+import soundfile as sf
+import numpy as np
+import wave
+import sounddevice as sd
+
+# Utility
+import requests
+from dotenv import load_dotenv
+from dateutil.parser import parse
+
+# Local modules
+from footer import footer
+
+# ----------------- Streamlit Config -------------------
+st.set_page_config(page_title="ApnaLawyer", layout="centered")
+
+# ----------------- Load Environment Variables -------------------
+load_dotenv()
+SPEECHMATICS_API_KEY = os.getenv('SPEECHMATICS_API_KEY')
+TOGETHER_API_KEY = os.getenv('TOGETHER_API_KEY')
+
+if not TOGETHER_API_KEY:
+    st.error("Please set TOGETHER_API_KEY environment variable")
+    st.stop()
+
+# ----------------- LLM Init -------------------
 llm = Together(
     model="mistralai/Mixtral-8x7B-Instruct-v0.1",
     temperature=0.7,
     max_tokens=1024,
-    together_api_key=os.getenv('TOGETHER_API_KEY')
+    together_api_key=TOGETHER_API_KEY
 )
 
+# ----------------- Firebase Init (Pyrebase) -------------------
+firebase_config = {
+    "apiKey": os.environ["FIREBASE_API_KEY"],
+    "authDomain": os.environ["FIREBASE_AUTH_DOMAIN"],
+    "databaseURL": os.environ["FIREBASE_DATABASE_URL"],
+    "projectId": os.environ["FIREBASE_PROJECT_ID"],
+    "storageBucket": os.environ["FIREBASE_STORAGE_BUCKET"],
+    "messagingSenderId": os.environ["FIREBASE_MESSAGING_SENDER_ID"],
+    "appId": os.environ["FIREBASE_APP_ID"]
+}
 
-# Load environment variables
-load_dotenv()
-SPEECHMATICS_API_KEY = os.getenv('SPEECHMATICS_API_KEY')
-api_key = os.getenv('TOGETHER_API_KEY')  # Set this in your environment
-if not api_key:
-    st.error("Please set TOGETHER_API_KEY environment variable")
-    st.stop()
+firebase = pyrebase.initialize_app(firebase_config)
+auth = firebase.auth()
 
-
-# Function to translate text
-def translate_text(text, target_language):
+# ----------------- Firebase Admin SDK Init -------------------
+def initialize_firebase():
     try:
-        # Use GoogleTranslator from deep-translator
-        translated_text = GoogleTranslator(source='auto', target=target_language).translate(text)
-        return translated_text
+        if not firebase_admin._apps:
+            creds_dict = json.loads(os.environ["FIREBASE_CREDS_JSON"])
+            cred = credentials.Certificate(creds_dict)
+            firebase_app = initialize_app(cred, {
+                'databaseURL': os.environ["FIREBASE_DB_URL"]
+            })
     except Exception as e:
-        return f"⚠ Translation failed: {str(e)}"
-    
+        st.error(f"Firebase initialization error: {str(e)}")
 
+initialize_firebase()
+
+# ----------------- UI -------------------
+col1, col2, col3 = st.columns([1, 30, 1])
+with col2:
+    st.image("images/banner.jpg", use_container_width=True)
+
+st.markdown("""
+    <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+    </style>
+    """, unsafe_allow_html=True)
+
+# ----------------- Translation Logic -------------------
 supported_languages = {
     "hindi": "hi",
     "english": "en",
-    "hinglish": "hi"  # special handling below
+    "hinglish": "hi"
 }
 
 devanagari_regex = re.compile(r'[\u0900-\u097F]+')
 
-
 def detect_target_language(prompt):
-    """Detect if the response should be in Hindi, Hinglish, or English only."""
     prompt_lower = prompt.lower().strip()
 
-    # Block Kannada and other unsupported scripts
-    if re.search(r'[\u0C80-\u0CFF]', prompt):  # Kannada unicode block
+    if re.search(r'[\u0C80-\u0CFF]', prompt):  # Kannada block
         return "hindi"
 
-    # Check if explicitly mentioned like: 'in hindi'
     for lang_name, lang_code in supported_languages.items():
         if f"in {lang_name}" in prompt_lower:
             return lang_name
 
-    # If it contains Devanagari, assume Hindi
     if devanagari_regex.search(prompt):
         return "hindi"
 
-    # Detect Hinglish by common Hindi terms in Latin script
     if re.search(r'\bdhara\b|\bkanoon\b|\bnyay\b', prompt_lower) and detect(prompt) == 'en':
         return "hinglish"
 
@@ -120,39 +143,11 @@ def detect_target_language(prompt):
 
     return "english"
 
-
-# Initialize the translator
-#translator = Translator()
-
-# Initialize Firebase (you would call this at the start of your app)
-def initialize_firebase():
+def translate_text(text, target_language):
     try:
-        if not firebase_admin._apps:
-            cred = credentials.Certificate("apna-lawyer-firebase-adminsdk-fbsvc-e3bf4df175.json")
-            firebase_app = initialize_app(cred, {
-                'databaseURL': firebaseConfig['databaseURL']
-            })
+        return GoogleTranslator(source='auto', target=target_language).translate(text)
     except Exception as e:
-        st.error(f"Firebase initialization error: {str(e)}")
-
-# ----------------- Firebase Init -------------------
-firebase = pyrebase.initialize_app(firebaseConfig)
-auth = firebase.auth()
-initialize_firebase()
-
-# ----------------- Streamlit Config -------------------
-st.set_page_config(page_title="ApnaLawyer", layout="centered")
-
-col1, col2, col3 = st.columns([1, 30, 1])
-with col2:
-    st.image("images/banner.jpg", use_container_width=True)
-
-st.markdown("""
-    <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-    </style>
-    """, unsafe_allow_html=True)
+        return f"⚠ Translation failed: {str(e)}"
 
 # ----------------- Login/Signup Interface -------------------
 import json
@@ -793,17 +788,20 @@ def chatbot_ui():
     input_variables=["context", "question", "chat_history"],
     template="""
 <s>[INST]
-You are ApnaLawyer, a helpful and trustworthy legal assistant for Indian citizens. You specialize in Indian laws, especially the Indian Penal Code (IPC) and related Acts.
+You are ApnaLawyer, a trusted and knowledgeable AI assistant for Indian citizens. You provide legally accurate help related to Indian laws — including the Indian Penal Code (IPC), CrPC, POCSO Act, Domestic Violence Act, and others.
 
-### Instructions:
-- Be clear, accurate, and structured like a legal advisor
-- Break down relevant IPC sections clause-wise if applicable (e.g., 376(1), 376-AB, 376-DA, etc.)
-- For each section, give the official title, **scenario it applies to, and the **exact punishment
-- Also mention relevant Acts, e.g., Criminal Law Amendment Act, 2013, POCSO Act, etc.
-- Use legal formatting: bullets, sub-points, emojis (like 🔹, 🔸, ➡), line breaks
-- Always refer only to authentic Indian laws
-- Do not fabricate or invent sections
-- End with a short summary of suggested action
+### Your responsibilities:
+- Use clear, simple, respectful language
+- Accurately cite laws (IPC sections, CrPC, Acts) **only when asked for legal explanation**
+- If the user asks you to "write", "draft", "create", or "format" a legal document or application, you must write a **formal legal draft**
+- Do not mix legal explanations with the draft unless asked — keep your response focused
+- You may write drafts such as:
+  - FIR applications
+  - Police complaints
+  - Legal notices
+  - Affidavits
+  - Consent forms
+- When drafting, use correct legal formatting, salutation, subject lines, and placeholders (name, address, date)
 
 ### CONTEXT:
 {context}
@@ -816,19 +814,33 @@ You are ApnaLawyer, a helpful and trustworthy legal assistant for Indian citizen
 
 ---
 
-Respond with the following structure:
+Based on the user's intent, choose **one of the following** response types:
 
-✅ Answer:  
-[A short summary of the situation and its legal seriousness]
+---
+📘 If the user is asking about the law, respond with:
 
-📘 Relevant Law(s):  
-[Break down each IPC section or Act related to the case, include title + clause-wise punishment]
+✅ **Answer**:  
+[Summary of the situation and legal explanation]
 
-🧾 Other Related Laws:  
-[Include relevant provisions like POCSO, 228A IPC, CrPC 164, etc.]
+📘 **Relevant Law(s)**:  
+[List exact IPC sections, Acts, clause-wise punishment, and applicable exceptions]
 
-📝 Suggested Action:  
-[Practical steps to take — police report, medical exam, legal aid, etc.]
+🧾 **Other Related Laws**:  
+[Include CrPC, POCSO, DV Act, or procedural laws if relevant]
+
+📝 **Suggested Action**:  
+[Practical next steps — where to file, what to prepare]
+
+🧾 **Summary**:  
+[Short recap in plain language]
+
+---
+
+
+✍️ If the user wants you to write or draft something, respond ONLY with:
+
+📄 **Legal Draft/Application**:
+[Write the complete legal document in clean, formal format using Indian legal norms. Use placeholders where needed.]
 
 </s>[/INST]
 """
